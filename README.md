@@ -206,3 +206,136 @@ If you use our model or dataset, please cite our Ready-to-React paper. If you us
 }
 
 ```
+## 本机复现环境（lyd）
+
+使用项目独立的 Python 3.9 `.venv`，核心版本为 PyTorch 1.13.0+cu116、
+TorchVision 0.14.0+cu116、TorchAudio 0.13.0+cu116、PyTorch3D 0.7.2。
+`requirements-compat.txt` 固定旧代码所需的 YAPF/NumPy 兼容版本；
+`requirements-runtime.lock` 记录本次安装的其他依赖版本。
+
+```bash
+# 首次安装（需要 uv）；不会修改其他项目的环境
+./scripts/install_env.sh
+source .venv/bin/activate
+```
+
+DuoBox 需向作者申请并遵守数据许可，仅限非商业研究且不得再分发。
+获批后将作者提供的压缩包解压为 `data/DuoBox/`，将官方权重解压为
+`data/trained_model/`。数据、权重、缓存与运行日志均不提交 Git。
+
+```text
+data/
+├── DuoBox/
+│   ├── fbx_export_joints/       # 117 个原始关节 npy 文件
+│   └── fbx_fit_smpl/
+├── trained_model/
+│   ├── vqvae_tokenizer/latest.pt
+│   ├── reactive_model/latest.pt
+│   └── sparse_control/latest.pt
+└── boxing/                     # 预处理生成
+```
+
+```bash
+# 首次预处理完整数据；再次运行会重新生成缓存
+./scripts/prepare_data.sh
+
+# 单个完整验证样本；不训练、不上传 W&B
+./scripts/smoke_reactive.sh
+
+# 完整长度的 reactive 推理（耗时更长）
+WANDB_MODE=disabled .venv/bin/python reactmotion/scripts/main.py \
+  -t test -c configs/exps/reactive_model.yaml \
+  model_cfg.inference_func=reactive
+```
+
+预处理脚本设置 `PYTHONHASHSEED=0`，稳定原代码通过 `set` 得到的角色顺序。
+它生成 reactive 和 sparse-control 两套缓存及相应归一化统计。
+Smoke 关闭 FID/APD，只验证模型加载、生成和可视化输出，不代表论文指标复现。
+
+查看可视化：
+
+```bash
+.venv/bin/wis3d --vis_dir data/wis3d --host 127.0.0.1 --port 19090
+```
+
+2026-10-09 本机验证（RTX 4090）：CUDA 矩阵乘法及反向传播、PyTorch3D CUDA
+KNN 及反向传播、完整 reactive/vr3joints 数据预处理、reactive 与 sparse-control
+各一个完整验证样本均通过。未启动训练，也未执行完整数据集指标评测。
+本地验证日志位于 `data/setup_logs/`，生成文件哈希记录在
+`data/setup_logs/artifacts.json`。
+
+### PyCharm 单步学习（本机配置）
+
+从 Show Apps 打开 PyCharm，打开 `/home/d080/workspace/ready_to_react`。
+运行配置选择 `Ready-to-React | Debug reactive (1 sample)`，使用 Debug（Shift+F9）。
+解释器固定为本项目 `.venv/bin/python`，工作目录为仓库根目录。
+环境变量：`PYTHONHASHSEED=0`、`OMP_NUM_THREADS=4`、`WANDB_MODE=disabled`、
+`PYTHONUNBUFFERED=1`、`PYDEVD_USE_FRAME_EVAL=NO`。
+配置仅运行一个完整验证样本，数据加载 `num_workers=0`，关闭 FID/APD。
+
+预设断点（行号对应当前源码）：
+
+| 位置 | 观察内容 |
+| --- | --- |
+| `general_model.py:76` | 第一次预测前；`ts=4`、`self.ts_step=4` |
+| `mocon_model.py:174` | 输入已组装；查看 `batch.latents.shape`、`batch.oppo_pose.shape`、`batch.pose_series.shape`、`batch.root_info.shape` |
+| `mocon_model.py:158` | 扩散采样完成，准备解码；查看 `future_latents.shape` |
+| `mocon_model.py:180` | 第一段的第一帧准备写回 agent；查看 `next_motion.shape`、`i` |
+
+F8 执行当前行，F7 进入函数，Shift+F8 跳出函数，F9 运行到下一个断点。
+初学时在扩散采样调用处用 F8，避免进入多次去噪循环；在 `pred_next` 处用 F7。
+先看张量的 `.shape` 和少量切片，避免展开整个数据集。
+IDE 设置与断点保存在本机 `.idea/`，通过 `.git/info/exclude` 排除，不修改模型源码。
+
+### 浏览原始 DuoBox 动作
+
+```bash
+.venv/bin/python scripts/browse_duobox.py --port 19091
+```
+
+打开 `http://127.0.0.1:19091/`，从下拉菜单选择原始双人序列。
+支持暂停、时间轴、0.5/1/2 倍速、拖动旋转及滚轮缩放。
+从原始 120 Hz 数据每 4 帧取一帧，以 30 FPS 回放；双方均为数据集动作。
+播放器仅绑定本机地址，不覆盖原数据或模型输出。
+本机统计：117 段双人录制，共 3807.7 秒；单段 4.825–63.492 秒。
+
+### Local reactive browser
+
+Run from this repository using the existing environment:
+
+```bash
+.venv/bin/python scripts/reactive_browser.py
+```
+
+Open http://127.0.0.1:19094/. Select a raw DuoBox recording, the fixed actor,
+start time, duration and seed, then generate the other actor using the released
+reactive-model and tokenizer checkpoints. Generation runs in a subprocess with
+one active job at a time; it is generated-then-played, not real-time streaming.
+
+The adapter follows the original dataset preprocessing: Z-up to Y-up, global
+rotations via FK, 120-to-30 Hz downsampling, and the initial one-model-frame
+offset needed for velocities. Segment lengths round down to a multiple of four
+frames and truncate at the recording end. The reacting actor's first four frames
+come from the original counterpart, followed by autoregressive model output.
+The fixed actor remains exactly the selected raw trajectory after preprocessing.
+The playback selector switches between AI and the original counterpart at the
+same frame, always showing two skeletons: orange fixed opponent and blue response.
+Clip timing and seed are under the expandable settings panel. This is not G1
+retargeting or physics simulation. Full raw recordings may include training data,
+so this browser is not a held-out benchmark.
+
+Each job saves its request, log, result JSON and motion NPZ under
+`data/reactive_browser/<job-id>/`. NPZ arrays are Y-up positions in meters
+with shape [T,21,3]: generated, fixed, reference; source_frames records the
+corresponding original 120 Hz indices. The page can reopen its last job after
+refresh and download the NPZ. A CUDA-capable configured environment is required.
+
+### G1 因果流式响应导出
+
+`scripts/reactive_stream_worker.py --request <job>/request.json` 复用发布的 reactive checkpoint，每次只向预测器提供已公开对手历史，输出 4 帧响应块，并等待下游 `ack_NNNN`。坐标从模型 Y-up 转回 DuoBox/GMR Z-up，输出全局关节位置和全局旋转。与 GMR 的 `scripts/reactive_g1_pipeline.py` 配合使用，浏览器入口在 19093 的 reactive_stream 版本。当前上层使用自身生成历史，不使用真实/仿真 G1 执行状态反馈；计算链路运行于虚拟时间。
+
+### 因果流式生成保存节点（2026-10-14）
+
+`scripts/reactive_stream_worker.py` 保留文件分块接口，并提供本地 Unix socket 接口供实时仿真使用。模型预热后常驻，每次生成 4 帧，只读取已释放的对手历史；支持固定种子的 normal/freeze/delay 输入对照。冻结/延迟同步变换位置与旋转后重新计算派生特征。实时网页入口位于相邻 GMR 仓库 `/live`，调度与物理跟踪位于部署仓库 `tools/reactive_realtime.py`。
+
+300ms 播放缓冲由外部调度器选择，不属于模型固有配置。本次保存同时收录此前未提交的环境安装、数据预处理及响应浏览器脚本；不提交数据、模型、生成缓存和 Python 字节码。

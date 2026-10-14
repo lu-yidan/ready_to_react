@@ -1,0 +1,5 @@
+# Compatibility with upstream's PyTorch 1.13 / Python 3.9 environment.
+# easyvolcap/engine/config.py calls FormatCode(..., verify=True).
+yapf==0.40.1
+numpy==1.26.4
+setuptools<81

@@ -1,0 +1,76 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DuoBox · AI 对练</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#0c1422;color:#e8eef8;font:15px system-ui}main{max-width:1200px;margin:auto;padding:24px}
+header{margin-bottom:22px}h1{font-size:25px;margin:0 0 8px}p{margin:0;color:#9faec3;line-height:1.6}
+.setup{display:flex;gap:24px;align-items:flex-start;background:#172338;padding:20px;border-radius:14px;margin-bottom:18px}.step{flex:1;min-width:0}.step-title{display:block;color:#a9bad0;font-size:13px;margin-bottom:10px}.num{color:#73c8ff;margin-right:7px}
+select,button,input{font:inherit;border:1px solid #3a4b64;border-radius:7px;background:#1b2b43;color:#edf5ff;padding:9px}select{max-width:100%;width:100%}button{cursor:pointer}button:disabled{opacity:.45;cursor:default}#generate{background:#67c8ff;color:#09233b;border:0;font-weight:700;width:100%}
+details{font-size:13px;color:#b1bfd2;margin-top:12px}summary{cursor:pointer}details label{display:inline-flex;gap:8px;align-items:center;margin:12px 12px 0 0}input{width:72px;padding:5px}
+#jobStatus{font-size:13px;margin-top:10px;line-height:1.5;color:#a9bad0}.viewer{border:1px solid #293950;border-radius:14px;overflow:hidden;background:#111827}.viewbar,.playbar{padding:14px 18px;display:flex;gap:14px;align-items:center;flex-wrap:wrap}.viewbar{justify-content:space-between;border-bottom:1px solid #23334a}#viewTitle{font-weight:600}#compare{width:auto;font-size:13px}.badge{font-size:13px;color:#a9bad0}#view{display:block;width:100%;height:49vh;min-height:300px;touch-action:none}#seek{flex:1;min-width:100px;padding:0;accent-color:#67c8ff}#speed{width:76px}#time{font-size:13px;color:#bccbdd;font-variant-numeric:tabular-nums}#status{padding:0 18px 16px;font-size:13px;color:#9faec3}footer{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-top:14px;color:#8093ad;font-size:12px}a{color:#73c8ff}#history{display:flex;gap:8px}#history button{font-size:12px;padding:5px 9px}.hidden,[hidden]{display:none!important}#legend{display:none}
+@media(max-width:720px){main{padding:12px}.setup{flex-direction:column;gap:16px}.step{width:100%}#view{height:42vh}.viewbar{gap:8px}}
+</style>
+<main>
+<header><h1>DuoBox · AI 对练</h1><p>选一段真人动作作为对手，让 AI 生成另一人的回应。</p></header>
+<section class="setup">
+<div class="step"><label class="step-title" for="clip"><span class="num">1</span>选动作</label><select id="clip" aria-label="动作序列"></select></div>
+<div class="step"><label class="step-title" for="fixed"><span class="num">2</span>谁按原始动作出招？</label><select id="fixed" aria-label="固定对手"></select><p style="font-size:12px;margin-top:8px">另一人的动作交给 AI。</p></div>
+<div class="step"><span class="step-title"><span class="num">3</span>看 AI 如何回应</span><button id="generate">生成 AI 响应</button><div id="jobStatus" aria-live="polite">默认生成开头约 3 秒。</div>
+<details><summary>片段与更多设置</summary><label>起始秒 <input id="start" type="number" min="0" step=".1" value="0"></label><label>时长秒 <input id="duration" type="number" min=".27" max="64" step=".1" value="3"></label><label>随机种子 <input id="seed" type="number" min="0" max="2147483647" value="0"></label></details></div>
+</section>
+<section class="viewer"><div class="viewbar"><div><span id="viewTitle">原始动作预览</span><span id="legend"></span></div><select id="compare" aria-label="播放内容" disabled><option value="ai">AI 响应</option><option value="original">原始回应 · 同一片段</option></select></div>
+<canvas id="view" aria-label="双人动作画面"></canvas>
+<div class="playbar"><button id="play">暂停</button><input id="seek" aria-label="播放进度" type="range" min="0" value="0" step="1"><span id="time"></span><select id="speed" aria-label="播放速度"><option value=".5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select><button id="reset">复位视角</button></div>
+<div id="status">加载中…</div></section>
+<footer><span>拖动旋转 · 滚轮缩放 · 前 4 帧为原始初始化，随后生成 · 无物理仿真</span><a id="download" hidden>下载轨迹</a></footer>
+<details><summary>最近结果</summary><div id="history"></div></details>
+<button id="raw" hidden>查看原始双人动作</button><input id="ghost" type="checkbox" hidden>
+</main>
+<script>
+const $=id=>document.getElementById(id),canvas=$('view'),ctx=canvas.getContext('2d');
+let data=null,playing=true,frame=0,last=0,yaw=.4,pitch=.15,zoom=1,center=[0,0,0],radius=2,loadId=0;
+const colors=['#38bdf8','#fb923c','#64748b'];
+function actorLabel(index){
+ const name=data.actors[index].name.split(' · ')[0];
+ const role=data.warmup?(index===1?'固定对手':index===2?'原始回应':'AI 响应'):'原始动作';
+ return name+' · '+role;
+}
+function identityStatus(){
+ return data.warmup?'橙色：'+actorLabel(1)+'　蓝色：'+actorLabel($('compare').value==='original'?2:0):
+ '当前双方均为真人录制：蓝色 '+data.actors[0].name+'，橙色 '+data.actors[1].name+'。点击上方生成 AI 响应。';
+}
+async function load(url){const id=++loadId;playing=false;$('status').textContent='正在读取动作…';try{const r=await fetch(typeof url==='string'?url:'/motion/'+$('clip').value);if(!r.ok)throw Error('读取失败');const d=await r.json();if(id!==loadId)return;data=d;frame=0;if(d.warmup){const clipOption=Array.from($('clip').options).find(o=>o.textContent.startsWith(d.file.slice(0,3)+' ·'));if(clipOption)$('clip').value=clipOption.value;const names=d.actors.slice(0,2).map(a=>a.name.split(' · ')[0]).sort();$('fixed').replaceChildren();names.forEach((name,i)=>{const o=document.createElement('option');o.value=i;o.textContent=name;$('fixed').append(o)});$('fixed').value=names.indexOf(d.actors[1].name.split(' · ')[0]);$('start').value=((d.source_start_frame-4)/120).toFixed(2);$('duration').value=(d.actors[0].positions.length/30).toFixed(2);$('seed').value=d.seed;}
+$('compare').disabled=!d.warmup;$('compare').hidden=!d.warmup;$('compare').value='ai';$('viewTitle').textContent=d.warmup?'生成结果 · '+d.file.slice(0,3):'原始预览 · 双方均为真人录制';
+if(!d.warmup){$('fixed').replaceChildren();d.actors.forEach((a,i)=>{const o=document.createElement('option');o.value=i;o.textContent=a.name;$('fixed').append(o)});$('fixed').value='1';}
+$('download').hidden=!d.warmup;const lo=[Infinity,Infinity,Infinity],hi=[-Infinity,-Infinity,-Infinity];for(const a of d.actors)for(const f of a.positions)for(const p of f)for(let k=0;k<3;k++){lo[k]=Math.min(lo[k],p[k]);hi[k]=Math.max(hi[k],p[k]);}center=lo.map((v,k)=>(v+hi[k])/2);radius=Math.max(hi[0]-lo[0],hi[1]-lo[1],hi[2]-lo[2],.1);$('seek').max=Math.min(...d.actors.map(a=>a.positions.length))-1;$('legend').replaceChildren();d.actors.forEach((a,i)=>{const s=document.createElement('span');s.style.color=colors[i%3];s.textContent=' ● '+a.name+' ';$('legend').append(s);});$('status').textContent=identityStatus();playing=true;$('play').textContent='暂停';}catch(e){$('status').textContent=String(e)}}
+function project(p,w,h){let x=p[0]-center[0],y=p[1]-center[1],z=p[2]-center[2];let xx=x*Math.cos(yaw)+z*Math.sin(yaw),zz=-x*Math.sin(yaw)+z*Math.cos(yaw);let yy=y*Math.cos(pitch)-zz*Math.sin(pitch);let scale=Math.min(w,h)*.78/radius*zoom;return [w/2+xx*scale,h/2-yy*scale];}
+function render(t){const dt=last?Math.min((t-last)/1000,.1):0;last=t;let w=canvas.clientWidth,h=canvas.clientHeight,dpr=devicePixelRatio;if(canvas.width!==Math.round(w*dpr)||canvas.height!==Math.round(h*dpr)){canvas.width=Math.round(w*dpr);canvas.height=Math.round(h*dpr);}ctx.setTransform(dpr,0,0,dpr,0,0);ctx.fillStyle='#111827';ctx.fillRect(0,0,w,h);if(data){const n=Number($('seek').max)+1;if(playing)frame=(frame+dt*30*Number($('speed').value))%n;let f=Math.floor(frame);$('seek').value=f;$('time').textContent=(f/30).toFixed(2)+' / '+(n/30).toFixed(2)+' s';for(let k=0;k<data.actors.length;k++){if(k===2&&$('compare').value!=='original')continue;if(k===0&&data.warmup&&$('compare').value==='original')continue;let points=data.actors[k].positions[f].map(p=>project(p,w,h));ctx.strokeStyle=colors[k===2?0:k];ctx.fillStyle=colors[k===2?0:k];ctx.lineWidth=4;ctx.lineCap='round';for(let j=1;j<points.length;j++){ctx.beginPath();ctx.moveTo(...points[data.parents[j]]);ctx.lineTo(...points[j]);ctx.stroke();}for(const p of points){ctx.beginPath();ctx.arc(...p,3,0,Math.PI*2);ctx.fill();}const head=points[4];ctx.font='600 14px system-ui';ctx.textAlign='center';ctx.fillText(actorLabel(k),head[0],head[1]-22);}}requestAnimationFrame(render);}
+$('clip').onchange=()=>load();$('compare').onchange=()=>{$('viewTitle').textContent=$('compare').value==='ai'?'AI 响应 · 同一片段':'原始回应 · 同一片段';$('status').textContent=identityStatus();};$('play').onclick=()=>{playing=!playing;$('play').textContent=playing?'暂停':'播放'};$('seek').oninput=()=>{frame=Number($('seek').value);playing=false;$('play').textContent='播放'};$('reset').onclick=()=>{yaw=.4;pitch=.15;zoom=1};let drag=null;canvas.onpointerdown=e=>{drag=[e.clientX,e.clientY];canvas.setPointerCapture(e.pointerId)};canvas.onpointerup=()=>drag=null;canvas.onpointermove=e=>{if(drag){yaw+=(e.clientX-drag[0])*.008;pitch=Math.max(-1.4,Math.min(1.4,pitch+(e.clientY-drag[1])*.008));drag=[e.clientX,e.clientY]}};canvas.onwheel=e=>{e.preventDefault();zoom=Math.max(.3,Math.min(8,zoom*Math.exp(-e.deltaY*.001)))};
+
+$('raw').onclick=()=>load();
+$('generate').onclick=async()=>{
+ const request={clip:Number($('clip').value),fixed:Number($('fixed').value),start:Math.round(Number($('start').value)*30),frames:Math.floor(Number($('duration').value)*30/4)*4,seed:Number($('seed').value)};
+ $('generate').disabled=true;
+ try{
+ const response=await fetch('/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(request)}),result=await response.json();
+ if(!response.ok)throw Error(result.error);
+ const key=result.id;localStorage.setItem('reactiveLastJob',key);
+ $('jobStatus').textContent='正在生成 AI 响应，请稍候…';
+ const poll=async()=>{
+ try{const status=await (await fetch('/job/'+key)).json();
+ if(status.status==='running'){setTimeout(poll,1500);return}
+ $('generate').disabled=false;
+ if(status.status!=='ready')throw Error('生成失败，请查看 data/reactive_browser/'+key+'/log.txt');
+ const button=document.createElement('button');button.textContent='结果 '+request.clip.toString().padStart(3,'0')+' / seed '+request.seed;
+ button.onclick=()=>showResult(key);$('history').append(button);
+ $('jobStatus').textContent='生成完成，下方正在播放。';
+ await showResult(key);
+ }catch(e){$('jobStatus').textContent=String(e);$('generate').disabled=false}};
+ poll();
+ }catch(e){$('jobStatus').textContent=String(e);$('generate').disabled=false}
+};
+async function showResult(key){$('jobStatus').textContent='已打开生成结果。';$('download').href='/job/'+key+'/download';await load('/job/'+key+'/result')}
+const previous=localStorage.getItem('reactiveLastJob');if(previous&&/^[a-f0-9]{32}$/.test(previous)){const b=document.createElement('button');b.textContent='打开上次生成结果';b.onclick=()=>showResult(previous);$('history').append(b)}
+
+fetch('/catalog').then(r=>r.json()).then(rows=>{for(const row of rows){let o=document.createElement('option');o.value=row.id;const words={jab:'刺拳',leadup:'前手上勾拳',rearup:'后手上勾拳',cross:'后手直拳',leadhook:'前手摆拳',rearhook:'后手摆拳',defense:'防守',shanbi:'闪避',yingji:'迎击',fanji:'反击',free:'自由对练',circle:'绕步',pivot:'转身',parry:'拍挡',hug:'抱架'};
+let parts=row.file.replace('_joints.npy','').split('_');o.textContent=parts[0]+' · '+parts.slice(1).map(w=>words[w]||w).join(' / ')+' · '+row.seconds.toFixed(1)+' 秒';$('clip').append(o)}load()}).catch(e=>$('status').textContent=String(e));requestAnimationFrame(render);
+</script></html>
